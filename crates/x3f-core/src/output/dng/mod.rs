@@ -452,14 +452,6 @@ fn populate_raw_ifd(
     );
     ifd.add(tags::ANTI_ALIAS_STRENGTH, Value::Rational(vec![(0, 1)]));
 
-    if let (Some(make), Some(model)) = (reader.dng_camf_text("Make"), reader.dng_camf_text("Model"))
-    {
-        let unique = format!("{make} {model}");
-        if let Ok(c) = CString::new(unique) {
-            ifd.add(tags::UNIQUE_CAMERA_MODEL, Value::Ascii(c));
-        }
-    }
-
     if let Some(active) = reader.dng_active_area(image) {
         // The raster we just wrote IS the active area (see the call site
         // in `write` for the why), so ActiveArea is the whole frame.
@@ -469,7 +461,17 @@ fn populate_raw_ifd(
         let normalised = [0, 0, out_rows, out_cols];
         ifd.add(tags::ACTIVE_AREA, Value::Long(normalised.to_vec()));
         if let Some(crop) = compute_default_user_crop(reader, &active) {
-            ifd.add(tags::DEFAULT_USER_CROP, Value::Float(crop.to_vec()));
+            // The DNG spec types DefaultUserCrop as RATIONAL; the FLOAT
+            // this writer used to emit is flagged by dng_validate
+            // ("unexpected type").
+            ifd.add(
+                tags::DEFAULT_USER_CROP,
+                Value::Rational(
+                    crop.iter()
+                        .map(|&v| ((f64::from(v) * 1_000_000.0).round() as u32, 1_000_000))
+                        .collect(),
+                ),
+            );
         }
     }
 
@@ -582,6 +584,50 @@ fn add_dng_top_level_tags(
                 tags::CALIBRATION_ILLUMINANT1,
                 Value::Short(vec![tags::CALIB_ILLUMINANT_WHITE_FLUORESCENT]),
             );
+        }
+    }
+
+    // UniqueCameraModel is required in IFD0 for all DNG files and Adobe
+    // keys camera matching off it. The writer used to emit it into the
+    // raw SubIFD (wrong IFD per spec) and only when the CAMF `Make` /
+    // `Model` text entries resolved — which they don't on Quattro
+    // bodies, leaving those files with no UniqueCameraModel at all
+    // (dng_validate: "Missing or invalid UniqueCameraModel"). Prefer the
+    // CAMF text pair (matching the legacy C writer's "%s %s" format),
+    // fall back to the EXIF capture metadata, avoiding a doubled make
+    // prefix — Sigma model strings already start with "SIGMA".
+    // Candidates are normalized first: trimmed, interior NULs stripped
+    // (they would truncate the ASCII tag), and empty results treated as
+    // missing — a required tag with an empty value is as bad as a
+    // missing one.
+    fn normalize(s: Option<&str>) -> Option<String> {
+        let t: String = s?.trim().chars().filter(|&c| c != '\0').collect();
+        (!t.is_empty()).then_some(t)
+    }
+    let camf_make = normalize(reader.dng_camf_text("Make").as_deref());
+    let camf_model = normalize(reader.dng_camf_text("Model").as_deref());
+    let meta_make = normalize(capture_meta.make.as_deref());
+    let meta_model = normalize(capture_meta.model.as_deref());
+    let unique = match (camf_make, camf_model) {
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        _ => match (meta_make, meta_model) {
+            (Some(make), Some(model)) => {
+                if model
+                    .to_ascii_lowercase()
+                    .starts_with(&make.to_ascii_lowercase())
+                {
+                    Some(model)
+                } else {
+                    Some(format!("{make} {model}"))
+                }
+            }
+            (None, Some(model)) => Some(model),
+            _ => None,
+        },
+    };
+    if let Some(unique) = unique {
+        if let Ok(c) = CString::new(unique) {
+            ifd.add(tags::UNIQUE_CAMERA_MODEL, Value::Ascii(c));
         }
     }
 
