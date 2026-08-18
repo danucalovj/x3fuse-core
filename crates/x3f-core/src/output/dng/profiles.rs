@@ -76,7 +76,8 @@ pub(crate) struct CameraProfile {
     /// `ProfileHueSatMapData1` for this profile. `None` = no hue/sat
     /// map (grayscale / unconverted). The CAMF value is a `float[2][5][21]`
     /// table that `hue_sat_map::build_hue_sat_map` collapses to a
-    /// 21×1×1 DNG hue/sat map.
+    /// 21×2×1 DNG hue/sat map (the correction row duplicated across both
+    /// saturation divisions — Adobe requires >= 2 sat divisions).
     multi_axis_camf: Option<&'static str>,
 }
 
@@ -550,9 +551,9 @@ fn build_mmcr_profile(
         (off, curve.len() as u32)
     });
     let hue_sat_map_meta = hue_sat_map.map(|hsm| {
-        // Both Dims (LONG[3], 12 bytes) and Data2 (FLOAT[N]) live as
+        // Both Dims (LONG[3], 12 bytes) and Data1 (FLOAT[N]) live as
         // externals. Pack them in tag-id order — Dims (50937), then
-        // Data2 (50939). Both are 4-byte aligned.
+        // Data1 (50938). Both are 4-byte aligned.
         let dims_off = (externals_start + ext.len()) as u32;
         for &d in &super::hue_sat_map::HUE_SAT_MAP_DIMS {
             ext.extend_from_slice(&d.to_be_bytes());
@@ -821,12 +822,15 @@ mod tests {
 
     #[test]
     fn mmcr_with_hue_sat_map_has_three_extra_tags_in_order() {
-        // Synth a 21×1×1 hue/sat map.
-        let mut hsm: Vec<f32> = Vec::with_capacity(21 * 3);
+        // Synth a 21×2×1 hue/sat map (sat varies fastest, rows duplicated
+        // across both sat divisions, matching build_hue_sat_map's output).
+        let mut hsm: Vec<f32> = Vec::with_capacity(21 * 2 * 3);
         for h in 0..21 {
-            hsm.push(h as f32 * 0.5); // hue shift
-            hsm.push(1.0 + h as f32 * 0.01); // sat scale
-            hsm.push(1.0); // value scale
+            for _ in 0..2 {
+                hsm.push(h as f32 * 0.5); // hue shift
+                hsm.push(1.0 + h as f32 * 0.01); // sat scale
+                hsm.push(1.0); // value scale
+            }
         }
         let blob = build_mmcr_profile(
             "Vivid",
@@ -859,7 +863,7 @@ mod tests {
 
     #[test]
     fn mmcr_hue_sat_map_encoding_is_inline_srgb() {
-        let hsm = vec![0.0_f32; 21 * 3];
+        let hsm = vec![0.0_f32; 21 * 2 * 3];
         let blob = build_mmcr_profile("X", [0.0_f32; 9], [0.0_f32; 9], None, Some(hsm.as_slice()));
         let off = u32::from_be_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
         let entry_count = u16::from_be_bytes([blob[off], blob[off + 1]]);
@@ -878,12 +882,13 @@ mod tests {
     }
 
     #[test]
-    fn mmcr_hue_sat_map_dims_payload_is_21_1_1() {
-        let hsm = vec![0.0_f32; 21 * 3];
+    fn mmcr_hue_sat_map_dims_payload_is_21_2_1() {
+        let hsm = vec![0.0_f32; 21 * 2 * 3];
         let blob = build_mmcr_profile("X", [0.0_f32; 9], [0.0_f32; 9], None, Some(hsm.as_slice()));
         let off = u32::from_be_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
         let entry_count = u16::from_be_bytes([blob[off], blob[off + 1]]);
         let mut dims_off = None;
+        let mut data1_count = None;
         for i in 0..entry_count as usize {
             let p = off + 2 + i * 12;
             let tag = u16::from_be_bytes([blob[p], blob[p + 1]]);
@@ -894,7 +899,18 @@ mod tests {
                             as usize,
                     );
             }
+            if tag == t::PROFILE_HUE_SAT_MAP_DATA1 {
+                data1_count = Some(u32::from_be_bytes([
+                    blob[p + 4],
+                    blob[p + 5],
+                    blob[p + 6],
+                    blob[p + 7],
+                ]));
+            }
         }
+        // Full-count table (21*2*1*3): must NOT take the SDK's skipSat0
+        // path, which triggers only when count = hues*(sats-1)*vals*3.
+        assert_eq!(data1_count, Some(126), "Data1 count must be 126");
         let dims_off = dims_off.expect("Dims tag missing");
         let h = u32::from_be_bytes([
             blob[dims_off],
@@ -914,7 +930,9 @@ mod tests {
             blob[dims_off + 10],
             blob[dims_off + 11],
         ]);
-        assert_eq!([h, s, v], [21, 1, 1]);
+        // Sat dimension must be >= 2: Adobe readers reject the whole DNG
+        // for a 1-sat-division table (see hue_sat_map module doc).
+        assert_eq!([h, s, v], [21, 2, 1]);
     }
 
     #[test]

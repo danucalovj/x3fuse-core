@@ -13,11 +13,24 @@
 //!   degrees**, group 1 holds the **saturation multiplier**.
 //!
 //! DNG `ProfileHueSatMapData1` (tag 50938) is a flat float array of
-//! `H × S × V × 3` triplets in `(value, saturation, hue)`-major order
-//! (hue varies fastest). Each triplet is
-//! `(hue_shift_deg, sat_scale, value_scale)`. We emit
-//! `dims = [21, 1, 1]` so the DNG table reduces to 21 triplets. The DNG
-//! reader interpolates in HSV space.
+//! `H × S × V × 3` triplets. Adobe's DNG SDK reads it with nested
+//! `for val { for hue { for sat } }` loops (`dng_camera_profile.cpp`,
+//! `ReadHueSatMap`), i.e. **saturation varies fastest**, then hue, then
+//! value. Each triplet is `(hue_shift_deg, sat_scale, value_scale)`.
+//!
+//! We emit `dims = [21, 2, 1]` with the correction row duplicated across
+//! both saturation divisions, so the correction applies at full strength
+//! at every saturation — matching how Sigma's own renderer applies the
+//! table (it does not attenuate by saturation).
+//!
+//! The saturation dimension MUST be at least 2. Adobe's DNG SDK asserts
+//! `satDivisions >= 2` (`dng_hue_sat_map.cpp`), and shipping Camera Raw
+//! treats a `dims = [21, 1, 1]` table as fatal: Lightroom / Photoshop /
+//! DNG Converter refuse to open the whole file ("the file-format module
+//! cannot parse the file"). An earlier version of this writer emitted
+//! `[21, 1, 1]`, which made every DNG with a non-identity hue/sat map —
+//! all Quattro files in practice — unreadable by Adobe products, while
+//! lenient readers (Apple RAW, exiftool, dng_validate) still opened it.
 //!
 //! Why *Data1* and not *Data2* (tag 50939): Adobe's DNG SDK pairs Data1
 //! with `CalibrationIlluminant1` / `ColorMatrix1` and Data2 with the
@@ -37,9 +50,11 @@
 
 use crate::Reader;
 
-/// 21-bin hue + 1-bin sat + 1-bin value DNG hue/sat map. Output is a flat
-/// `Vec<f32>` of 21 × 3 = 63 floats, each triplet
-/// `(hue_shift_deg, sat_scale, value_scale)`.
+/// 21-bin hue + 2-bin sat + 1-bin value DNG hue/sat map. Output is a flat
+/// `Vec<f32>` of 21 × 2 × 3 = 126 floats in the SDK's read order
+/// (saturation fastest): for each hue bin, the same
+/// `(hue_shift_deg, sat_scale, value_scale)` triplet twice — once per
+/// saturation division.
 ///
 /// Returns `None` if:
 /// - the named CAMF entry is missing or the wrong shape, or
@@ -63,19 +78,26 @@ pub(crate) fn build_hue_sat_map(reader: &Reader, name: &str) -> Option<Vec<f32>>
         return None;
     }
 
-    let mut out: Vec<f32> = Vec::with_capacity(N_HUE * 3);
+    const N_SAT: usize = 2;
+    let mut out: Vec<f32> = Vec::with_capacity(N_HUE * N_SAT * 3);
     for h in 0..N_HUE {
-        out.push(hue_row[h] as f32);
-        out.push(sat_row[h] as f32);
-        out.push(1.0);
+        // Saturation varies fastest in the SDK's read order; both sat
+        // divisions carry the same correction (see module doc).
+        for _ in 0..N_SAT {
+            out.push(hue_row[h] as f32);
+            out.push(sat_row[h] as f32);
+            out.push(1.0);
+        }
     }
     Some(out)
 }
 
 /// `ProfileHueSatMapDims` (tag 50937) value for `build_hue_sat_map`'s
 /// output: `[hue_divisions, sat_divisions, value_divisions]`. Every map
-/// we emit uses the same dims, so this is a constant.
-pub(crate) const HUE_SAT_MAP_DIMS: [u32; 3] = [21, 1, 1];
+/// we emit uses the same dims, so this is a constant. The saturation
+/// dimension must be >= 2 or Adobe readers reject the entire DNG (see
+/// module doc).
+pub(crate) const HUE_SAT_MAP_DIMS: [u32; 3] = [21, 2, 1];
 
 /// `ProfileHueSatMapEncoding` (tag 51107). 1 = sRGB (operates after the
 /// sRGB gamma); 0 = linear. Sigma applies these in display HSV, so sRGB.

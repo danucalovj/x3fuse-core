@@ -77,9 +77,18 @@ x3f_extract -tiff -no-denoise <input>   # TIFF column
 
 | Input | DNG | TIFF |
 | ----- | --- | ---- |
-| SD1M (`sigma_sd1_merrill_15.x3f`) | `16f0d954b4cb4aea3f3683a33896da21` | `277cf4b4691652bd57c96b15ba03d47f` |
-| older raw (`_SDI8040.X3F`) | `58b0376f041f69e6076bdc498c5952f9` | `b4cc09aa1c8d127274056660a92ffc0d` |
-| Quattro (`_SDI8284.X3F`) | `7402b517b953dfceceebd569e53d0615` | `661df021b16de5164b03624776fd5507` |
+| SD1M (`sigma_sd1_merrill_15.x3f`) | _needs re-pin (see below)_ | `277cf4b4691652bd57c96b15ba03d47f` |
+| older raw (`_SDI8040.X3F`) | _needs re-pin (see below)_ | `b4cc09aa1c8d127274056660a92ffc0d` |
+| Quattro (`_SDI8284.X3F`) | _needs re-pin (see below)_ | `661df021b16de5164b03624776fd5507` |
+
+The DNG column is pending a re-pin after the intentional
+`ProfileHueSatMapDims` fix ([21,1,1] → [21,2,1] with duplicated rows —
+Adobe readers reject 1-sat-division tables and refused to open affected
+DNGs at all). The change moves DNG bytes for every file with a
+non-identity hue/sat map; TIFF output is unaffected. Re-pin from the
+first machine with the corpus available (previous DNG values:
+`16f0d954b4cb4aea3f3683a33896da21` / `58b0376f041f69e6076bdc498c5952f9` /
+`7402b517b953dfceceebd569e53d0615`).
 
 These must match across a change unless the change is an _intentional_
 algorithm change — in which case re-pin this table in the same commit
